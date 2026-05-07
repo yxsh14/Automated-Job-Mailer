@@ -22,7 +22,6 @@ env/
 
 # Data (sensitive)
 data/contacts.xlsx
-data/resume.pdf
 
 # PID files
 *.pid
