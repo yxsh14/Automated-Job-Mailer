@@ -176,10 +176,18 @@ class EmailSender:
         """Attempt to send the email up to max_retries times."""
         for attempt in range(1, self.max_retries + 1):
             try:
-                with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=30) as server:
-                    server.ehlo()
-                    server.starttls()
-                    server.ehlo()
+                # Automatic SSL/TLS detection
+                if self.smtp_port == 465:
+                    server_class = smtplib.SMTP_SSL
+                else:
+                    server_class = smtplib.SMTP
+
+                with server_class(self.smtp_host, self.smtp_port, timeout=30) as server:
+                    if self.smtp_port != 465:
+                        server.ehlo()
+                        server.starttls()
+                        server.ehlo()
+                    
                     server.login(self.email_address, self.email_password)
                     server.sendmail(self.email_address, recipient, msg.as_string())
 

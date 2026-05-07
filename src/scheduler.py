@@ -9,6 +9,7 @@ outside the configured operating hours.
 import logging
 import random
 import time
+import pytz
 from datetime import datetime, timedelta
 from src.email_sender import EmailSender
 from src.utils import generate_daily_summary
@@ -54,18 +55,13 @@ class Scheduler:
 
     def run(self) -> None:
         """
-        Main loop — runs indefinitely until stopped.
-
-        Behaviour:
-        - Waits until the start hour each day.
-        - Sends up to ``emails_per_day`` emails with random pauses.
-        - Stops early if no unsent contacts remain.
-        - Generates a daily summary after the sending window closes.
+        Main loop - runs indefinitely until stopped.
         """
-        logger.info("Scheduler started. Entering main loop.")
+        logger.info("Scheduler started. Operating in IST (Asia/Kolkata) timezone.")
+        tz = pytz.timezone("Asia/Kolkata")
 
         while not self.should_stop:
-            now = datetime.now()
+            now = datetime.now(tz)
 
             # ---- Day boundary reset ----
             today_str = now.strftime("%Y-%m-%d")
@@ -175,7 +171,8 @@ class Scheduler:
         )
 
     def _seconds_until(self, target_hour: int) -> float:
-        now = datetime.now()
+        tz = pytz.timezone("Asia/Kolkata")
+        now = datetime.now(tz)
         target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)

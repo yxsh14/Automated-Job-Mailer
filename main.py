@@ -21,6 +21,8 @@ import os
 import signal
 import sys
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from config.settings import get_settings
@@ -144,11 +146,27 @@ def run_scheduler(email_sender: EmailSender, data_handler: Any, settings, logger
     signal.signal(signal.SIGINT, _handle_signal)
 
     logger.info(
-        f"Scheduler running | window: {settings.schedule.start_hour}:00-{settings.schedule.end_hour}:00 "
+        f"Scheduler running | window: {settings.schedule.start_hour}:00-{settings.schedule.end_hour}:00 (IST) "
         f"| {settings.schedule.emails_per_day} emails/day "
         f"| interval: {settings.schedule.min_interval_minutes}-{settings.schedule.max_interval_minutes} min"
     )
     scheduler.run()
+
+
+def start_dummy_server():
+    """Starts a tiny web server to satisfy Render's port check."""
+    class HealthCheckHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Service is running")
+        def log_message(self, format, *args):
+            return # Silent logs
+
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logging.getLogger("email_automation").info(f"Health-check server started on port {port}")
+    server.serve_forever()
 
 
 def main() -> None:
@@ -187,6 +205,9 @@ def main() -> None:
         f"{data_handler.count_unsent()} unsent | "
         f"{data_handler.count_sent()} already sent"
     )
+
+    # Start health-check server in a background thread for Render
+    threading.Thread(target=start_dummy_server, daemon=True).start()
 
     # Run mode
     if args.now:
