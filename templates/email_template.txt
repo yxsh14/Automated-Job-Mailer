@@ -1,0 +1,20 @@
+
+Subject: Application for Software Engineer Opportunities at {company}
+
+Hi {contact_name},
+
+I hope you're doing well.
+
+I'm Yash, a Software Engineer with ~2 years of experience building scalable backend systems and full-stack applications. I graduated from IIIT Jabalpur and currently work on production-grade systems involving APIs, microservices, real-time architectures, and distributed systems using technologies like Node.js, Java, React, PostgreSQL, Kafka, and AWS.
+
+What excites me about {company} is the opportunity to work on impactful engineering problems with strong ownership and scale. I believe my experience in building reliable systems and solving real-world production challenges would make me a good fit for your team.
+
+If there are any suitable opportunities at {company}, I'd be very grateful to be considered for them. I've attached my resume for your reference.
+
+Looking forward to hearing from you.
+
+Best regards,
+Yash Sahu
+9111728778
+LinkedIn: https://www.linkedin.com/in/yash-sahu1410/
+Portfolio: https://yash-software-profile.vercel.app/

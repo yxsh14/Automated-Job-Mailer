@@ -1,0 +1,193 @@
+"""
+Scheduler for the Email Automation Service.
+
+Orchestrates the daily email-sending loop: checks for unsent contacts,
+randomises intervals between sends, enforces daily limits, and stops
+outside the configured operating hours.
+"""
+
+import logging
+import random
+import time
+from datetime import datetime, timedelta
+from typing import Optional
+
+from src.email_sender import EmailSender
+from src.excel_handler import ExcelHandler
+from src.utils import generate_daily_summary
+
+logger = logging.getLogger("email_automation")
+
+
+class Scheduler:
+    """Manages the daily schedule of outbound emails."""
+
+    def __init__(
+        self,
+        email_sender: EmailSender,
+        excel_handler: ExcelHandler,
+        start_hour: int = 9,
+        end_hour: int = 16,
+        emails_per_day: int = 20,
+        min_interval: int = 18,
+        max_interval: int = 24,
+        log_dir: Optional[str] = None,
+    ) -> None:
+        self.email_sender = email_sender
+        self.excel_handler = excel_handler
+        self.start_hour = start_hour
+        self.end_hour = end_hour
+        self.emails_per_day = emails_per_day
+        self.min_interval = min_interval
+        self.max_interval = max_interval
+        self.log_dir = log_dir
+
+        # Daily counters (reset every new day)
+        self._sent_today: int = 0
+        self._failed_today: int = 0
+        self._current_date: Optional[str] = None
+
+        # Graceful shutdown flag (set externally via signal handler)
+        self.should_stop: bool = False
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def run(self) -> None:
+        """
+        Main loop — runs indefinitely until stopped.
+
+        Behaviour:
+        - Waits until the start hour each day.
+        - Sends up to ``emails_per_day`` emails with random pauses.
+        - Stops early if no unsent contacts remain.
+        - Generates a daily summary after the sending window closes.
+        """
+        logger.info("Scheduler started. Entering main loop.")
+
+        while not self.should_stop:
+            now = datetime.now()
+
+            # ---- Day boundary reset ----
+            today_str = now.strftime("%Y-%m-%d")
+            if self._current_date != today_str:
+                self._reset_daily_counters(today_str)
+
+            # ---- Outside operating hours → sleep until start ----
+            if now.hour < self.start_hour:
+                wait = self._seconds_until(self.start_hour)
+                logger.info(
+                    f"Before operating hours ({self.start_hour}:00). "
+                    f"Sleeping {wait // 60:.0f} minutes."
+                )
+                self._sleep(wait)
+                continue
+
+            if now.hour >= self.end_hour:
+                self._end_of_day_summary()
+                wait = self._seconds_until_next_day_start()
+                logger.info(
+                    f"After operating hours ({self.end_hour}:00). "
+                    f"Sleeping until tomorrow {self.start_hour}:00 "
+                    f"({wait // 3600:.1f} hours)."
+                )
+                self._sleep(wait)
+                continue
+
+            # ---- Daily limit reached ----
+            if self._sent_today >= self.emails_per_day:
+                logger.info(
+                    f"Daily limit reached ({self.emails_per_day} emails). "
+                    f"Waiting for next day."
+                )
+                self._end_of_day_summary()
+                wait = self._seconds_until_next_day_start()
+                self._sleep(wait)
+                continue
+
+            # ---- No unsent contacts ----
+            if not self.excel_handler.has_unsent():
+                logger.info("No new contacts to process. Sleeping until next day.")
+                self._end_of_day_summary()
+                wait = self._seconds_until_next_day_start()
+                self._sleep(wait)
+                continue
+
+            # ---- Send next email ----
+            self._send_next()
+
+            # ---- Random interval ----
+            interval = random.randint(self.min_interval, self.max_interval) * 60
+            logger.info(f"Next email in {interval // 60} minutes.")
+            self._sleep(interval)
+
+        logger.info("Scheduler stopped by external signal.")
+
+    def stop(self) -> None:
+        """Request a graceful shutdown."""
+        logger.info("Graceful shutdown requested.")
+        self.should_stop = True
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _send_next(self) -> None:
+        """Fetch the next unsent contact and attempt to send an email."""
+        contact = self.excel_handler.get_next_unsent()
+        if contact is None:
+            return
+
+        email = str(contact.get("Email", "")).strip()
+        name = str(contact.get("ContactName", "Hiring Manager")).strip()
+        company = str(contact.get("Company", "")).strip()
+        position = str(contact.get("Position", "")).strip()
+
+        logger.info(f"Sending email to {email} ({name} at {company})")
+
+        success = self.email_sender.send_email(
+            recipient_email=email,
+            contact_name=name,
+            company=company,
+        )
+
+        if success:
+            self._sent_today += 1
+            self.excel_handler.mark_as_sent(email)
+        else:
+            self._failed_today += 1
+            # Mark as sent to avoid retrying the same broken address forever
+            self.excel_handler.mark_as_sent(email)
+            logger.warning(f"Email to {email} failed — marked to prevent retry loop.")
+
+    def _reset_daily_counters(self, today_str: str) -> None:
+        self._sent_today = 0
+        self._failed_today = 0
+        self._current_date = today_str
+        logger.info(f"Daily counters reset for {today_str}.")
+
+    def _end_of_day_summary(self) -> None:
+        remaining = self.excel_handler.count_unsent()
+        generate_daily_summary(
+            total_sent=self._sent_today,
+            total_failed=self._failed_today,
+            total_remaining=remaining,
+            log_dir=self.log_dir,
+        )
+
+    def _seconds_until(self, target_hour: int) -> float:
+        now = datetime.now()
+        target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return (target - now).total_seconds()
+
+    def _seconds_until_next_day_start(self) -> float:
+        return self._seconds_until(self.start_hour)
+
+    def _sleep(self, seconds: float) -> None:
+        """Sleep in small increments so we can react to ``should_stop``."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end and not self.should_stop:
+            time.sleep(min(5, end - time.monotonic()))
