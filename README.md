@@ -1,6 +1,18 @@
 # Email Automation Service
 
-Sends personalized job-application emails to HR contacts — 20 per day, with random intervals between 9 AM and 4 PM. Supports both **local Excel** and **Google Sheets** as the contacts backend.
+A professional, secure Python-based email automation service designed for job applications. It sends personalized emails with resume attachments to HR contacts at a controlled rate (e.g., 20 per day) with random intervals to ensure high deliverability and avoid spam filters.
+
+Supports both **local Excel** files and **Google Sheets** (Cloud) as the contact database.
+
+---
+
+## Key Features
+
+- **Automated Scheduling:** Runs between business hours (9 AM - 4 PM) and sleeps outside this window.
+- **Randomized Intervals:** Waits 18-24 minutes between emails to mimic human behavior.
+- **Smart Personalization:** Auto-fills `{contact_name}` and `{company}` in templates.
+- **Duplicate Prevention:** Automatically marks contacts as "SENT" in the database to ensure no one is contacted twice.
+- **Cloud Ready:** Optimized for deployment on Railway or Render using Google Sheets.
 
 ---
 
@@ -14,16 +26,16 @@ pip install -r requirements.txt
 
 # 2. Configure
 cp .env.example .env
-# Edit .env — add your Gmail address and App Password
+# Edit .env - add your Gmail address and App Password
 
 # 3. Add your files
 # Place contacts.xlsx in data/
 # Place resume.pdf in data/
 
-# 4. Test — send 1 email right now
+# 4. Test - send 1 email immediately
 python main.py --now
 
-# 5. Run the full scheduler (9 AM – 4 PM daily)
+# 5. Run the full scheduler (9 AM - 4 PM daily loop)
 python main.py
 ```
 
@@ -36,127 +48,60 @@ Google requires an **App Password** (not your normal password) for SMTP:
 1. Go to [myaccount.google.com/security](https://myaccount.google.com/security)
 2. Enable **2-Step Verification**
 3. Search for **"App Passwords"**
-4. Select app → **Mail**, device → **Windows Computer**
+4. Select app -> **Mail**, device -> **Other (Custom Name)** (e.g., "AutoMailer")
 5. Copy the 16-character password into `EMAIL_PASSWORD` in `.env`
-
----
-
-## Excel / Contacts Format
-
-Your `data/contacts.xlsx` must have these columns (column names are flexible):
-
-| Email | Company | Name / ContactName | Title / Position | Sent | SentDate |
-|---|---|---|---|---|---|
-| hr@company.com | Acme Corp | Priya | HR Manager | | |
-
-- **Sent** and **SentDate** are added automatically — don't fill them in.
-- The service skips any row where `Sent = TRUE`.
 
 ---
 
 ## Cloud Deployment (Railway + Google Sheets)
 
-Run the service 24/7 without keeping your PC on.
+### Step 1 - Google Sheet Setup
+1. Create a [Google Sheet](https://sheets.google.com).
+2. Add headers: `Email`, `Company`, `ContactName`, `Position`.
+3. Copy the **Sheet ID** from the URL: `.../d/THIS_IS_THE_ID/edit`.
 
-### Step 1 — Google Sheet setup
+### Step 2 - Google Service Account
+1. Go to [Google Cloud Console](https://console.cloud.google.com).
+2. Enable **Google Sheets API** and **Google Drive API**.
+3. Create a **Service Account** and download the **JSON Key**.
+4. **Share your Google Sheet** with the Service Account email as an **Editor**.
 
-1. Create a new [Google Sheet](https://sheets.google.com)
-2. Add columns: `Email | Company | ContactName | Position`
-3. Paste your HR contacts into the sheet
-4. Copy the **Sheet ID** from the URL:
-   ```
-   https://docs.google.com/spreadsheets/d/THIS_IS_THE_SHEET_ID/edit
-   ```
+### Step 3 - Deployment Variables
+When deploying to Railway, add these Environment Variables:
 
-### Step 2 — Google Service Account (free)
-
-1. Go to [console.cloud.google.com](https://console.cloud.google.com)
-2. Create a new project (e.g. "AutoMailer")
-3. Enable **Google Sheets API** and **Google Drive API**
-4. Go to **IAM & Admin → Service Accounts → Create**
-5. Download the JSON key file
-6. **Share your Google Sheet** with the service account email (ends in `@...gserviceaccount.com`) — give it **Editor** access
-
-### Step 3 — Deploy to Railway
-
-1. Push this repo to GitHub (contacts and .env are git-ignored — safe)
-2. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub
-3. Select your repo
-4. Go to **Variables** tab and add:
-
-| Variable | Value |
+| Variable | Tip |
 |---|---|
-| `SMTP_HOST` | `smtp.gmail.com` |
-| `SMTP_PORT` | `587` |
-| `EMAIL_ADDRESS` | your Gmail |
-| `EMAIL_PASSWORD` | your 16-char App Password |
-| `GOOGLE_SHEET_ID` | the ID from Step 1 |
-| `GOOGLE_CREDENTIALS_JSON` | paste the entire contents of the JSON key file |
-| `START_HOUR` | `9` |
-| `END_HOUR` | `16` |
-| `EMAILS_PER_DAY` | `20` |
+| `GOOGLE_SHEET_ID` | The ID from Step 1 |
+| `GOOGLE_CREDENTIALS_JSON` | The entire JSON key file content |
 
-5. Railway will auto-deploy and start the scheduler. Done.
-
-> **Resume:** Upload `resume.pdf` to Railway via the **Files** tab, or mount a Volume and set `RESUME_FILE` to that path.
+> **IMPORTANT:** In your `.env` file, wrap the `GOOGLE_CREDENTIALS_JSON` value in single quotes to handle special characters:
+> `GOOGLE_CREDENTIALS_JSON='{"type": "service_account", ...}'`
 
 ---
 
-## Commands
+## How It Works (The Loop)
 
-```bash
-# Send 1 email immediately (test mode)
-python main.py --now
+Once the service is started (locally or on a server), it follows this logic:
 
-# Send 5 emails immediately
-python main.py --now --count 5
+- **Check Time:** If it's before 9 AM, it sleeps until 9 AM. If it's after 4 PM, it sleeps until 9 AM the next day.
+- **Send Cycle:**
+  1. Pick the next contact where `Sent` is not `TRUE`.
+  2. Send the personalized email + resume.
+  3. Mark the row as `TRUE` in the sheet/Excel.
+  4. Wait for a random interval (e.g., 21 minutes).
+  5. Repeat until 20 emails are sent or 4 PM is reached.
+- **Next Day:** If the daily limit (20) is reached, it sleeps until 9 AM the next morning and starts again.
 
-# Run full scheduler (9 AM – 4 PM loop)
-python main.py
-```
-
----
-
-## How It Works
-
-```
-9:00 AM  → Checks Google Sheet / Excel for unsent contacts
-9:00 AM  → Sends email #1, marks row as SENT
-9:21 AM  → Sends email #2  (random 18–24 min gap)
-9:44 AM  → Sends email #3
-...
-4:00 PM  → Stops. Sleeps until 9 AM tomorrow.
-```
-
-- Each email is personalized with `{contact_name}` and `{company}` from the sheet
-- Resume PDF is attached automatically
-- No contact is ever emailed twice (`Sent = TRUE` prevents duplicates)
-- Service auto-stops when all contacts are exhausted
-
----
-
-## Email Template
-
-Edit `templates/email_template.txt`. The first line starting with `Subject:` becomes the email subject.
-
-Available placeholders:
-- `{contact_name}` — the HR person's name
-- `{company}` — the company name
+**Yes, once deployed, it stays active and will automatically resume every morning at your configured `START_HOUR`.**
 
 ---
 
 ## Monitoring
 
-```bash
-# View today's log
-type logs\email_automation_2024-05-07.log
-
-# Count emails sent today
-findstr "Email sent successfully" logs\email_automation_2024-05-07.log | find /c "sent"
-```
+- **Logs:** Check the `logs/` directory for detailed execution history.
+- **Tracking:** The `Sent` and `SentDate` columns in your sheet/Excel will update in real-time.
 
 ---
 
 ## License
-
 MIT
