@@ -2,7 +2,7 @@
 main.py — Entry point for the Email Automation Service.
 
 Usage:
-    # Run the full scheduler (respects 9 AM – 4 PM window):
+    # Run the full scheduler (respects 9 AM - 4 PM window):
     python main.py
 
     # Send ONE email right now (for testing, bypasses time window):
@@ -10,9 +10,14 @@ Usage:
 
     # Send N emails right now:
     python main.py --now --count 5
+
+Data source (auto-detected from env vars):
+    - GOOGLE_SHEET_ID set  -> uses Google Sheets (cloud, for Railway deployment)
+    - GOOGLE_SHEET_ID unset -> uses local Excel file (data/contacts.xlsx)
 """
 
 import argparse
+import os
 import signal
 import sys
 import logging
@@ -21,8 +26,10 @@ from pathlib import Path
 from config.settings import get_settings
 from config.logging_config import setup_logging
 from src.email_sender import EmailSender
-from src.excel_handler import ExcelHandler
 from src.scheduler import Scheduler
+from src.excel_handler import ExcelHandler
+from src.sheets_handler import SheetsHandler
+from typing import Any
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,31 +63,42 @@ def build_components(settings):
     )
     email_sender.load_template()
 
-    excel_handler = ExcelHandler(settings.files.excel_file)
-    excel_handler.load()
-    excel_handler.validate()
+    # Auto-detect backend: Google Sheets (cloud) or local Excel
+    sheet_id = os.getenv("GOOGLE_SHEET_ID", "").strip()
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
 
-    return email_sender, excel_handler
+    if sheet_id and creds_json:
+        data_handler = SheetsHandler(sheet_id=sheet_id, credentials_json=creds_json)
+        logger_tmp = logging.getLogger("email_automation")
+        logger_tmp.info("Backend: Google Sheets (cloud mode)")
+    else:
+        data_handler = ExcelHandler(settings.files.excel_file)
+        logger_tmp = logging.getLogger("email_automation")
+        logger_tmp.info(f"Backend: Local Excel ({settings.files.excel_file})")
+
+    data_handler.load()
+    data_handler.validate()
+
+    return email_sender, data_handler
 
 
-def run_now(email_sender: EmailSender, excel_handler: ExcelHandler, count: int, logger: logging.Logger) -> None:
+def run_now(email_sender: EmailSender, data_handler: Any, count: int, logger: logging.Logger) -> None:
     """Send `count` emails immediately — used for testing."""
     logger.info(f"[--now mode] Sending {count} email(s) immediately.")
     sent = 0
     failed = 0
 
     for i in range(count):
-        contact = excel_handler.get_next_unsent()
+        contact = data_handler.get_next_unsent()
         if contact is None:
-            logger.warning("No more unsent contacts in Excel. Stopping.")
+            logger.warning("No more unsent contacts. Stopping.")
             break
 
         email     = str(contact.get("Email", "")).strip()
         name      = str(contact.get("ContactName", "Hiring Manager")).strip()
         company   = str(contact.get("Company", "")).strip()
-        position  = str(contact.get("Position", "")).strip()
 
-        logger.info(f"[{i+1}/{count}] Sending to {email} — {name} at {company}")
+        logger.info(f"[{i+1}/{count}] Sending to {email} - {name} at {company}")
 
         success = email_sender.send_email(
             recipient_email=email,
@@ -90,25 +108,25 @@ def run_now(email_sender: EmailSender, excel_handler: ExcelHandler, count: int, 
 
         if success:
             sent += 1
-            excel_handler.mark_as_sent(email)
-            logger.info(f"✓ Sent and marked: {email}")
+            data_handler.mark_as_sent(email)
+            logger.info(f"Sent and marked: {email}")
         else:
             failed += 1
             # Still mark to avoid hammering a broken address
-            excel_handler.mark_as_sent(email)
-            logger.error(f"✗ Failed (marked to skip on retry): {email}")
+            data_handler.mark_as_sent(email)
+            logger.error(f"Failed (marked to skip on retry): {email}")
 
     logger.info(
         f"[--now mode] Done. Sent: {sent} | Failed: {failed} | "
-        f"Remaining: {excel_handler.count_unsent()}"
+        f"Remaining: {data_handler.count_unsent()}"
     )
 
 
-def run_scheduler(email_sender: EmailSender, excel_handler: ExcelHandler, settings, logger: logging.Logger) -> None:
-    """Start the full scheduler loop (respects 9 AM – 4 PM window)."""
+def run_scheduler(email_sender: EmailSender, data_handler: Any, settings, logger: logging.Logger) -> None:
+    """Start the full scheduler loop (respects 9 AM - 4 PM window)."""
     scheduler = Scheduler(
         email_sender=email_sender,
-        excel_handler=excel_handler,
+        data_handler=data_handler,
         start_hour=settings.schedule.start_hour,
         end_hour=settings.schedule.end_hour,
         emails_per_day=settings.schedule.emails_per_day,
@@ -119,16 +137,16 @@ def run_scheduler(email_sender: EmailSender, excel_handler: ExcelHandler, settin
 
     # Graceful shutdown on SIGTERM / Ctrl-C
     def _handle_signal(signum, frame):
-        logger.info(f"Signal {signum} received — shutting down gracefully.")
+        logger.info(f"Signal {signum} received - shutting down gracefully.")
         scheduler.stop()
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
     logger.info(
-        f"Scheduler running | window: {settings.schedule.start_hour}:00–{settings.schedule.end_hour}:00 "
+        f"Scheduler running | window: {settings.schedule.start_hour}:00-{settings.schedule.end_hour}:00 "
         f"| {settings.schedule.emails_per_day} emails/day "
-        f"| interval: {settings.schedule.min_interval_minutes}–{settings.schedule.max_interval_minutes} min"
+        f"| interval: {settings.schedule.min_interval_minutes}-{settings.schedule.max_interval_minutes} min"
     )
     scheduler.run()
 
@@ -144,7 +162,7 @@ def main() -> None:
     )
 
     logger.info("=" * 60)
-    logger.info("  Email Automation Service — starting up")
+    logger.info("  Email Automation Service - starting up")
     logger.info("=" * 60)
 
     # Validate credentials
@@ -156,25 +174,25 @@ def main() -> None:
 
     # Build components
     try:
-        email_sender, excel_handler = build_components(settings)
+        email_sender, data_handler = build_components(settings)
     except FileNotFoundError as e:
         logger.error(f"Missing file: {e}")
         sys.exit(1)
     except ValueError as e:
-        logger.error(f"Excel validation failed: {e}")
+        logger.error(f"Data backend initialization failed: {e}")
         sys.exit(1)
 
     logger.info(
-        f"Contacts loaded: {excel_handler.total_contacts()} total | "
-        f"{excel_handler.count_unsent()} unsent | "
-        f"{excel_handler.count_sent()} already sent"
+        f"Contacts loaded: {data_handler.total_contacts()} total | "
+        f"{data_handler.count_unsent()} unsent | "
+        f"{data_handler.count_sent()} already sent"
     )
 
     # Run mode
     if args.now:
-        run_now(email_sender, excel_handler, args.count, logger)
+        run_now(email_sender, data_handler, args.count, logger)
     else:
-        run_scheduler(email_sender, excel_handler, settings, logger)
+        run_scheduler(email_sender, data_handler, settings, logger)
 
 
 if __name__ == "__main__":

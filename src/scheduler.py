@@ -10,11 +10,9 @@ import logging
 import random
 import time
 from datetime import datetime, timedelta
-from typing import Optional
-
 from src.email_sender import EmailSender
-from src.excel_handler import ExcelHandler
 from src.utils import generate_daily_summary
+from typing import Any, Optional
 
 logger = logging.getLogger("email_automation")
 
@@ -25,7 +23,7 @@ class Scheduler:
     def __init__(
         self,
         email_sender: EmailSender,
-        excel_handler: ExcelHandler,
+        data_handler: Any,
         start_hour: int = 9,
         end_hour: int = 16,
         emails_per_day: int = 20,
@@ -34,7 +32,7 @@ class Scheduler:
         log_dir: Optional[str] = None,
     ) -> None:
         self.email_sender = email_sender
-        self.excel_handler = excel_handler
+        self.data_handler = data_handler
         self.start_hour = start_hour
         self.end_hour = end_hour
         self.emails_per_day = emails_per_day
@@ -107,7 +105,7 @@ class Scheduler:
                 continue
 
             # ---- No unsent contacts ----
-            if not self.excel_handler.has_unsent():
+            if not self.data_handler.has_unsent():
                 logger.info("No new contacts to process. Sleeping until next day.")
                 self._end_of_day_summary()
                 wait = self._seconds_until_next_day_start()
@@ -135,7 +133,7 @@ class Scheduler:
 
     def _send_next(self) -> None:
         """Fetch the next unsent contact and attempt to send an email."""
-        contact = self.excel_handler.get_next_unsent()
+        contact = self.data_handler.get_next_unsent()
         if contact is None:
             return
 
@@ -154,12 +152,12 @@ class Scheduler:
 
         if success:
             self._sent_today += 1
-            self.excel_handler.mark_as_sent(email)
+            self.data_handler.mark_as_sent(email)
         else:
             self._failed_today += 1
             # Mark as sent to avoid retrying the same broken address forever
-            self.excel_handler.mark_as_sent(email)
-            logger.warning(f"Email to {email} failed — marked to prevent retry loop.")
+            self.data_handler.mark_as_sent(email)
+            logger.warning(f"Email to {email} failed - marked to prevent retry loop.")
 
     def _reset_daily_counters(self, today_str: str) -> None:
         self._sent_today = 0
@@ -168,7 +166,7 @@ class Scheduler:
         logger.info(f"Daily counters reset for {today_str}.")
 
     def _end_of_day_summary(self) -> None:
-        remaining = self.excel_handler.count_unsent()
+        remaining = self.data_handler.count_unsent()
         generate_daily_summary(
             total_sent=self._sent_today,
             total_failed=self._failed_today,
