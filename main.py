@@ -157,11 +157,11 @@ def start_dummy_server():
     """Starts a tiny web server to satisfy Render's port check."""
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
+            logging.getLogger("email_automation").info(f"Ping received from {self.address_string()} - Service is awake.")
             self.send_response(200)
+            self.send_header("Content-type", "text/plain")
             self.end_headers()
             self.wfile.write(b"Service is running")
-        def log_message(self, format, *args):
-            return # Silent logs
 
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
