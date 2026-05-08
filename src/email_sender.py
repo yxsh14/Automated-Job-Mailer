@@ -140,6 +140,7 @@ class EmailSender:
             return replacements.get(key, match.group(0))  # leave unknown tokens intact
 
         subject = re.sub(r"\{([^}]+)\}", replace_token, subject)
+        subject = subject.strip()
         body = re.sub(r"\{([^}]+)\}", replace_token, body)
         return subject, body
 
