@@ -17,12 +17,47 @@ Setup:
 
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import gspread
+from gspread.exceptions import APIError
+from requests.exceptions import ConnectionError as RequestsConnectionError
 
 logger = logging.getLogger("email_automation")
+
+# ---------------------------------------------------------------------------
+# Network-resilient helper
+# ---------------------------------------------------------------------------
+_RETRYABLE_ERRORS = (
+    RequestsConnectionError,
+    APIError,
+    TimeoutError,
+    OSError,
+)
+
+
+def _sheets_retry(fn, *args, max_retries: int = 5, base_delay: float = 3.0, **kwargs):
+    """
+    Call ``fn(*args, **kwargs)``, retrying up to ``max_retries`` times on
+    transient network / Google API errors with exponential backoff.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except _RETRYABLE_ERRORS as exc:
+            if attempt == max_retries:
+                logger.error(
+                    f"Google Sheets call failed after {max_retries} attempts: {exc}"
+                )
+                raise
+            delay = base_delay * (2 ** (attempt - 1))  # 3s, 6s, 12s, 24s …
+            logger.warning(
+                f"Google Sheets connection error (attempt {attempt}/{max_retries}): {exc}. "
+                f"Retrying in {delay:.0f}s…"
+            )
+            time.sleep(delay)
 
 # Column aliases — same flexible mapping as ExcelHandler
 COLUMN_ALIASES: Dict[str, List[str]] = {
@@ -104,7 +139,7 @@ class SheetsHandler:
     def get_next_unsent(self) -> Optional[Dict[str, Any]]:
         """Return the first row where Sent != TRUE, or None."""
         self._ensure_loaded()
-        records = self._worksheet.get_all_records()
+        records = _sheets_retry(self._worksheet.get_all_records)
         for record in records:
             sent_val = str(record.get("Sent", "")).strip().upper()
             if sent_val != "TRUE":
@@ -118,12 +153,12 @@ class SheetsHandler:
         sent_col  = self._col_index("Sent")
         date_col  = self._col_index("SentDate")
 
-        col_values = self._worksheet.col_values(email_col)
+        col_values = _sheets_retry(self._worksheet.col_values, email_col)
         for row_idx, cell_email in enumerate(col_values, start=1):
             if cell_email.strip().lower() == email.strip().lower() and row_idx > 1:
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self._worksheet.update_cell(row_idx, sent_col, "TRUE")
-                self._worksheet.update_cell(row_idx, date_col, now)
+                _sheets_retry(self._worksheet.update_cell, row_idx, sent_col, "TRUE")
+                _sheets_retry(self._worksheet.update_cell, row_idx, date_col, now)
                 logger.info(f"Marked {email} as sent in Google Sheet at {now}")
                 return
 
@@ -136,7 +171,7 @@ class SheetsHandler:
     def count_unsent(self) -> int:
         """Count rows where Sent != TRUE."""
         self._ensure_loaded()
-        records = self._worksheet.get_all_records()
+        records = _sheets_retry(self._worksheet.get_all_records)
         return sum(
             1 for r in records
             if str(r.get("Sent", "")).strip().upper() != "TRUE"
@@ -145,7 +180,7 @@ class SheetsHandler:
     def count_sent(self) -> int:
         """Count rows where Sent == TRUE."""
         self._ensure_loaded()
-        records = self._worksheet.get_all_records()
+        records = _sheets_retry(self._worksheet.get_all_records)
         return sum(
             1 for r in records
             if str(r.get("Sent", "")).strip().upper() == "TRUE"
@@ -154,7 +189,7 @@ class SheetsHandler:
     def total_contacts(self) -> int:
         """Total number of data rows (excluding header)."""
         self._ensure_loaded()
-        return len(self._worksheet.get_all_records())
+        return len(_sheets_retry(self._worksheet.get_all_records))
 
     # ------------------------------------------------------------------
     # Internal helpers

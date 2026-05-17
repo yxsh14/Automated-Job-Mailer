@@ -175,6 +175,15 @@ class EmailSender:
 
     def _send_with_retry(self, msg: MIMEMultipart, recipient: str) -> bool:
         """Attempt to send the email up to max_retries times."""
+        # SMTP codes that indicate a permanent failure — no point retrying
+        PERMANENT_FAIL_CODES = {
+            550,  # Mailbox not found / user unknown
+            551,  # User not local
+            552,  # Mailbox full (permanent for our purposes)
+            553,  # Mailbox name not allowed
+            554,  # Transaction failed / spam policy
+        }
+
         for attempt in range(1, self.max_retries + 1):
             try:
                 # Automatic SSL/TLS detection
@@ -201,6 +210,41 @@ class EmailSender:
                 )
                 # Don't retry auth errors — they won't self-heal
                 return False
+
+            except smtplib.SMTPRecipientsRefused as e:
+                # Parse the per-recipient error codes
+                refused = e.recipients  # dict: {email: (code, msg)}
+                codes = {code for code, _ in refused.values()}
+                if codes & PERMANENT_FAIL_CODES:
+                    logger.warning(
+                        f"Permanent delivery failure for {recipient} "
+                        f"(mailbox does not exist or was rejected): {refused}. Skipping."
+                    )
+                    return False  # Don't retry — address is invalid
+                # Transient refusal — fall through to retry logic
+                logger.warning(
+                    f"Recipients refused for {recipient} "
+                    f"(attempt {attempt}/{self.max_retries}): {refused}"
+                )
+                if attempt < self.max_retries:
+                    logger.info(f"Retrying in {self.retry_delay} seconds...")
+                    time.sleep(self.retry_delay)
+
+            except smtplib.SMTPResponseException as e:
+                # Catch other numeric SMTP errors
+                if e.smtp_code in PERMANENT_FAIL_CODES:
+                    logger.warning(
+                        f"Permanent SMTP error {e.smtp_code} for {recipient}: "
+                        f"{e.smtp_error}. Skipping without retry."
+                    )
+                    return False
+                logger.warning(
+                    f"SMTP error {e.smtp_code} for {recipient} "
+                    f"(attempt {attempt}/{self.max_retries}): {e.smtp_error}"
+                )
+                if attempt < self.max_retries:
+                    logger.info(f"Retrying in {self.retry_delay} seconds...")
+                    time.sleep(self.retry_delay)
 
             except (smtplib.SMTPException, OSError) as e:
                 logger.warning(

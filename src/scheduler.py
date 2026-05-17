@@ -45,6 +45,7 @@ class Scheduler:
         self._sent_today: int = 0
         self._failed_today: int = 0
         self._current_date: Optional[str] = None
+        self._last_send_time: Optional[datetime] = None
 
         # Graceful shutdown flag (set externally via signal handler)
         self.should_stop: bool = False
@@ -61,62 +62,121 @@ class Scheduler:
         tz = pytz.timezone("Asia/Kolkata")
 
         while not self.should_stop:
-            now = datetime.now(tz)
+            try:
+                now = datetime.now(tz)
 
-            # ---- Day boundary reset ----
-            today_str = now.strftime("%Y-%m-%d")
-            if self._current_date != today_str:
-                self._reset_daily_counters(today_str)
+                # ---- Day boundary reset ----
+                today_str = now.strftime("%Y-%m-%d")
+                if self._current_date != today_str:
+                    self._reset_daily_counters(today_str)
 
-            # ---- Outside operating hours → sleep until start ----
-            if now.hour < self.start_hour:
-                wait = self._seconds_until(self.start_hour)
-                logger.info(
-                    f"Before operating hours ({self.start_hour}:00). "
-                    f"Sleeping {wait // 60:.0f} minutes."
+                # ---- Outside operating hours → sleep until start ----
+                if now.hour < self.start_hour:
+                    wait = self._seconds_until(self.start_hour)
+                    logger.info(
+                        f"Before operating hours ({self.start_hour}:00). "
+                        f"Sleeping {wait // 60:.0f} minutes."
+                    )
+                    self._sleep(wait)
+                    continue
+
+                if now.hour >= self.end_hour:
+                    self._end_of_day_summary()
+                    wait = self._seconds_until_next_day_start()
+                    logger.info(
+                        f"After operating hours ({self.end_hour}:00). "
+                        f"Sleeping until tomorrow {self.start_hour}:00 "
+                        f"({wait // 3600:.1f} hours)."
+                    )
+                    self._sleep(wait)
+                    continue
+
+                # ---- Daily limit reached ----
+                if self._sent_today >= self.emails_per_day:
+                    logger.info(
+                        f"Daily limit reached ({self.emails_per_day} emails). "
+                        f"Waiting for next day."
+                    )
+                    self._end_of_day_summary()
+                    wait = self._seconds_until_next_day_start()
+                    self._sleep(wait)
+                    continue
+
+                # ---- No unsent contacts ----
+                if not self.data_handler.has_unsent():
+                    logger.info("No new contacts to process. Sleeping until next day.")
+                    self._end_of_day_summary()
+                    wait = self._seconds_until_next_day_start()
+                    self._sleep(wait)
+                    continue
+
+                # ---- Send next email ----
+                self._send_next()
+                self._last_send_time = datetime.now(tz)
+
+                # ---- Random interval ----
+                interval = random.randint(self.min_interval, self.max_interval) * 60
+                logger.info(f"Next email in {interval // 60} minutes.")
+                self._sleep(interval)
+
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    f"Unexpected error in scheduler loop: {exc}. "
+                    "Recovering and retrying in 30 seconds…",
+                    exc_info=True,
                 )
-                self._sleep(wait)
-                continue
+                self._sleep(30)
 
-            if now.hour >= self.end_hour:
-                self._end_of_day_summary()
-                wait = self._seconds_until_next_day_start()
-                logger.info(
-                    f"After operating hours ({self.end_hour}:00). "
-                    f"Sleeping until tomorrow {self.start_hour}:00 "
-                    f"({wait // 3600:.1f} hours)."
-                )
-                self._sleep(wait)
-                continue
+        logger.info("Scheduler loop stopped.")
 
-            # ---- Daily limit reached ----
-            if self._sent_today >= self.emails_per_day:
-                logger.info(
-                    f"Daily limit reached ({self.emails_per_day} emails). "
-                    f"Waiting for next day."
-                )
-                self._end_of_day_summary()
-                wait = self._seconds_until_next_day_start()
-                self._sleep(wait)
-                continue
+    def process_once(self) -> str:
+        """
+        Check conditions and send ONE email if appropriate.
+        This is designed to be called by an external trigger (e.g. HTTP request).
+        Returns a status message.
+        """
+        tz = pytz.timezone("Asia/Kolkata")
+        now = datetime.now(tz)
 
-            # ---- No unsent contacts ----
-            if not self.data_handler.has_unsent():
-                logger.info("No new contacts to process. Sleeping until next day.")
-                self._end_of_day_summary()
-                wait = self._seconds_until_next_day_start()
-                self._sleep(wait)
-                continue
+        # ---- Day boundary reset ----
+        today_str = now.strftime("%Y-%m-%d")
+        if self._current_date != today_str:
+            self._reset_daily_counters(today_str)
 
-            # ---- Send next email ----
-            self._send_next()
+        # ---- Outside operating hours ----
+        if now.hour < self.start_hour or now.hour >= self.end_hour:
+            msg = f"Outside operating hours ({self.start_hour}:00-{self.end_hour}:00)."
+            logger.info(msg)
+            return msg
 
-            # ---- Random interval ----
-            interval = random.randint(self.min_interval, self.max_interval) * 60
-            logger.info(f"Next email in {interval // 60} minutes.")
-            self._sleep(interval)
+        # ---- Daily limit reached ----
+        if self._sent_today >= self.emails_per_day:
+            msg = f"Daily limit reached ({self.emails_per_day})."
+            logger.info(msg)
+            return msg
 
-        logger.info("Scheduler stopped by external signal.")
+        # ---- Interval check (throttle) ----
+        if self._last_send_time:
+            # We use the minimum interval as the throttle
+            elapsed = (now - self._last_send_time).total_seconds() / 60
+            if elapsed < self.min_interval:
+                msg = f"Throttling: only {elapsed:.1f} min elapsed since last send (min: {self.min_interval})."
+                logger.info(msg)
+                return msg
+
+        # ---- No unsent contacts ----
+        if not self.data_handler.has_unsent():
+            msg = "No unsent contacts remaining."
+            logger.info(msg)
+            return msg
+
+        # ---- Send next email ----
+        self._send_next()
+        self._last_send_time = now
+        
+        msg = f"Email sent to next contact. Total today: {self._sent_today}."
+        logger.info(msg)
+        return msg
 
     def stop(self) -> None:
         """Request a graceful shutdown."""

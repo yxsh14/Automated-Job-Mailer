@@ -153,15 +153,21 @@ def run_scheduler(email_sender: EmailSender, data_handler: Any, settings, logger
     scheduler.run()
 
 
-def start_dummy_server():
-    """Starts a tiny web server to satisfy Render's port check."""
+def start_dummy_server(scheduler: Scheduler):
+    """Starts a tiny web server to satisfy Render's port check and trigger emails."""
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
-            logging.getLogger("email_automation").info(f"Ping received from {self.address_string()} - Service is awake.")
+            logger = logging.getLogger("email_automation")
+            logger.info(f"Trigger received from {self.address_string()}")
+            
+            # Attempt to send ONE email if conditions are met
+            status = scheduler.process_once()
+            
             self.send_response(200)
             self.send_header("Content-type", "text/plain")
             self.end_headers()
-            self.wfile.write(b"Service is running")
+            response_text = f"Service is awake. Status: {status}"
+            self.wfile.write(response_text.encode())
 
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
@@ -206,14 +212,41 @@ def main() -> None:
         f"{data_handler.count_sent()} already sent"
     )
 
+    # Initialize Scheduler
+    scheduler = Scheduler(
+        email_sender=email_sender,
+        data_handler=data_handler,
+        start_hour=settings.schedule.start_hour,
+        end_hour=settings.schedule.end_hour,
+        emails_per_day=settings.schedule.emails_per_day,
+        min_interval=settings.schedule.min_interval_minutes,
+        max_interval=settings.schedule.max_interval_minutes,
+        log_dir=settings.logging.log_dir,
+    )
+
     # Start health-check server in a background thread for Render
-    threading.Thread(target=start_dummy_server, daemon=True).start()
+    # This server now triggers scheduler.process_once() on every GET request
+    threading.Thread(target=start_dummy_server, args=(scheduler,), daemon=True).start()
 
     # Run mode
     if args.now:
         run_now(email_sender, data_handler, args.count, logger)
     else:
-        run_scheduler(email_sender, data_handler, settings, logger)
+        # Full scheduler loop (fallback for local runs)
+        # On Render, the process stays alive here while the dummy server handles pings
+        run_scheduler_instance(scheduler, logger)
+
+
+def run_scheduler_instance(scheduler: Scheduler, logger: logging.Logger) -> None:
+    """Run the scheduler instance with signal handling."""
+    def _handle_signal(signum, frame):
+        logger.info(f"Signal {signum} received - shutting down gracefully.")
+        scheduler.stop()
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    scheduler.run()
 
 
 if __name__ == "__main__":
